@@ -4,6 +4,7 @@ Stack Overflow API client for searching questions and answers.
 import requests
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote
+import re
 
 
 class StackOverflowAPI:
@@ -17,6 +18,59 @@ class StackOverflowAPI:
             'User-Agent': 'Stack-Over-MCP/1.0'
         })
     
+    def _extract_keywords(self, query: str) -> List[str]:
+        """
+        Extract key terms from a query for fallback searches.
+        
+        Args:
+            query: Original search query
+        
+        Returns:
+            List of important keywords
+        """
+        # Remove common words and extract meaningful terms
+        stop_words = {'how', 'to', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'for', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'among', 'can', 'could', 'should', 'would', 'will', 'shall', 'may', 'might', 'must', 'do', 'does', 'did', 'have', 'has', 'had', 'be', 'am', 'is', 'are', 'was', 'were', 'been', 'being', 'get', 'got', 'make', 'made', 'take', 'took', 'give', 'gave', 'come', 'came', 'go', 'went', 'see', 'saw', 'know', 'knew', 'think', 'thought', 'say', 'said', 'tell', 'told', 'become', 'became', 'leave', 'left', 'find', 'found', 'seem', 'seemed', 'turn', 'turned', 'put', 'set', 'move', 'moved', 'right', 'way', 'even', 'back', 'good', 'new', 'first', 'last', 'long', 'great', 'little', 'own', 'other', 'old', 'right', 'big', 'high', 'different', 'small', 'large', 'next', 'early', 'young', 'important', 'few', 'public', 'bad', 'same', 'able'}
+        
+        # Split query into words and filter
+        words = re.findall(r'\b\w+\b', query.lower())
+        keywords = [word for word in words if word not in stop_words and len(word) > 2]
+        
+        return keywords[:5]  # Limit to top 5 keywords
+    
+    def _extract_technology_terms(self, query: str) -> List[str]:
+        """
+        Extract technology/framework names that could be used as tags.
+        
+        Args:
+            query: Original search query
+        
+        Returns:
+            List of potential technology tags
+        """
+        # Common technology terms that are often tags on Stack Overflow
+        tech_terms = {
+            'python', 'javascript', 'java', 'c#', 'c++', 'php', 'ruby', 'go', 'rust', 'swift', 'kotlin',
+            'react', 'vue', 'angular', 'node', 'express', 'django', 'flask', 'spring', 'laravel',
+            'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch',
+            'docker', 'kubernetes', 'aws', 'azure', 'gcp',
+            'pandas', 'numpy', 'tensorflow', 'pytorch',
+            'airflow', 'spark', 'hadoop', 'kafka',
+            'git', 'github', 'gitlab', 'jenkins', 'ci/cd'
+        }
+        
+        query_lower = query.lower()
+        found_terms = []
+        
+        for term in tech_terms:
+            if term in query_lower:
+                found_terms.append(term)
+        
+        # Handle special cases
+        if 'dag' in query_lower and 'airflow' in query_lower:
+            found_terms.append('airflow-scheduler')
+        
+        return found_terms
+
     def search_questions(
         self, 
         query: str, 
@@ -56,12 +110,104 @@ class StackOverflowAPI:
         try:
             response = self.session.get(f"{self.BASE_URL}/search", params=params)
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            
+            # If no results, try fallback searches
+            if not result.get('items'):
+                result = self._try_fallback_searches(query, limit, sort, tags, accepted_only)
+            
+            return result
         except requests.RequestException as e:
             return {
                 'error': f"API request failed: {str(e)}",
                 'items': []
             }
+    
+    def _try_fallback_searches(
+        self, 
+        original_query: str, 
+        limit: int, 
+        sort: str, 
+        original_tags: Optional[List[str]], 
+        accepted_only: bool
+    ) -> Dict[str, Any]:
+        """
+        Try multiple fallback search strategies when initial search returns no results.
+        
+        Args:
+            original_query: The original search query
+            limit: Maximum results to return
+            sort: Sort order
+            original_tags: Original tags filter
+            accepted_only: Whether to only return accepted answers
+        
+        Returns:
+            Search results from fallback strategies
+        """
+        fallback_strategies = [
+            # Strategy 1: Extract keywords and search with those
+            {
+                'query': ' '.join(self._extract_keywords(original_query)),
+                'tags': original_tags,
+                'accepted_only': False  # Relax accepted_only constraint
+            },
+            # Strategy 2: Use technology terms as tags with broader query
+            {
+                'query': ' '.join(self._extract_keywords(original_query)),
+                'tags': self._extract_technology_terms(original_query) or original_tags,
+                'accepted_only': False
+            },
+            # Strategy 3: Very broad search with just technology tags
+            {
+                'query': '',
+                'tags': self._extract_technology_terms(original_query),
+                'accepted_only': False
+            },
+            # Strategy 4: Single most important keyword
+            {
+                'query': self._extract_keywords(original_query)[0] if self._extract_keywords(original_query) else original_query.split()[0],
+                'tags': None,
+                'accepted_only': False
+            }
+        ]
+        
+        for strategy in fallback_strategies:
+            if not strategy['query'] and not strategy['tags']:
+                continue
+                
+            params = {
+                'order': 'desc',
+                'sort': sort,
+                'q': strategy['query'],
+                'site': 'stackoverflow',
+                'pagesize': min(max(limit, 1), 100),
+                'filter': 'withbody'
+            }
+            
+            if strategy['tags']:
+                params['tagged'] = ';'.join(strategy['tags'])
+            
+            if strategy['accepted_only']:
+                params['accepted'] = 'True'
+            
+            try:
+                response = self.session.get(f"{self.BASE_URL}/search", params=params)
+                response.raise_for_status()
+                result = response.json()
+                
+                if result.get('items'):
+                    # Add metadata about which fallback strategy worked
+                    result['fallback_used'] = {
+                        'original_query': original_query,
+                        'fallback_query': strategy['query'],
+                        'fallback_tags': strategy['tags']
+                    }
+                    return result
+            except requests.RequestException:
+                continue
+        
+        # If all fallback strategies fail, return empty result
+        return {'items': []}
     
     def get_question_with_answers(self, question_id: int) -> Dict[str, Any]:
         """

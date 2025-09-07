@@ -67,8 +67,19 @@ def search_stackoverflow(
         if not formatted_results:
             return [{
                 'message': f'No results found for query: "{query}"',
-                'suggestion': 'Try using different keywords or removing tag filters'
+                'suggestion': 'Try using different keywords, removing tag filters, or using broader search terms'
             }]
+        
+        # Add fallback information if used
+        if 'fallback_used' in results:
+            fallback_info = results['fallback_used']
+            formatted_results.insert(0, {
+                'info': f'Used fallback search strategy',
+                'original_query': fallback_info['original_query'],
+                'fallback_query': fallback_info['fallback_query'],
+                'fallback_tags': fallback_info.get('fallback_tags'),
+                'note': 'Results below are from a modified search to find relevant content'
+            })
         
         return formatted_results
         
