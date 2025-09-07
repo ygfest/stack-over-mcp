@@ -92,6 +92,29 @@ class StackOverflowAPI:
         Returns:
             Dictionary containing search results
         """
+        # Try different search strategies based on input
+        if query and tags:
+            # Use advanced search when both query and tags are provided
+            return self._search_advanced(query, limit, sort, tags, accepted_only)
+        elif tags and not query:
+            # Use questions endpoint when only tags are provided
+            return self._search_by_tags_only(tags, limit, sort, accepted_only)
+        elif query and not tags:
+            # Use advanced search for query-only searches
+            return self._search_advanced(query, limit, sort, tags, accepted_only)
+        else:
+            # Fallback to popular questions
+            return self._search_by_tags_only(['python'], limit, sort, accepted_only)
+    
+    def _search_advanced(
+        self, 
+        query: str, 
+        limit: int, 
+        sort: str, 
+        tags: Optional[List[str]], 
+        accepted_only: bool
+    ) -> Dict[str, Any]:
+        """Use the /search/advanced endpoint for better results."""
         params = {
             'order': 'desc',
             'sort': sort,
@@ -108,7 +131,7 @@ class StackOverflowAPI:
             params['accepted'] = 'True'
         
         try:
-            response = self.session.get(f"{self.BASE_URL}/search", params=params)
+            response = self.session.get(f"{self.BASE_URL}/search/advanced", params=params)
             response.raise_for_status()
             result = response.json()
             
@@ -117,6 +140,36 @@ class StackOverflowAPI:
                 result = self._try_fallback_searches(query, limit, sort, tags, accepted_only)
             
             return result
+        except requests.RequestException as e:
+            return {
+                'error': f"API request failed: {str(e)}",
+                'items': []
+            }
+    
+    def _search_by_tags_only(
+        self, 
+        tags: List[str], 
+        limit: int, 
+        sort: str, 
+        accepted_only: bool
+    ) -> Dict[str, Any]:
+        """Use the /questions endpoint for tag-only searches."""
+        params = {
+            'order': 'desc',
+            'sort': sort,
+            'tagged': ';'.join(tags),
+            'site': 'stackoverflow',
+            'pagesize': min(max(limit, 1), 100),
+            'filter': 'withbody'
+        }
+        
+        if accepted_only:
+            params['accepted'] = 'True'
+        
+        try:
+            response = self.session.get(f"{self.BASE_URL}/questions", params=params)
+            response.raise_for_status()
+            return response.json()
         except requests.RequestException as e:
             return {
                 'error': f"API request failed: {str(e)}",
@@ -191,7 +244,13 @@ class StackOverflowAPI:
                 params['accepted'] = 'True'
             
             try:
-                response = self.session.get(f"{self.BASE_URL}/search", params=params)
+                if strategy['query'] and strategy['tags']:
+                    response = self.session.get(f"{self.BASE_URL}/search/advanced", params=params)
+                elif strategy['tags'] and not strategy['query']:
+                    response = self.session.get(f"{self.BASE_URL}/questions", params=params)
+                else:
+                    response = self.session.get(f"{self.BASE_URL}/search/advanced", params=params)
+                
                 response.raise_for_status()
                 result = response.json()
                 
